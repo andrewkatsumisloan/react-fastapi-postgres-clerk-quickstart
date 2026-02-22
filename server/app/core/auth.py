@@ -1,41 +1,45 @@
-# auth.py
+from typing import Any, Dict, Optional
+import logging
 
-import os
-from typing import Optional, Dict
-
+import httpx
 import jwt
+from fastapi import Depends, Header, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
-from fastapi import FastAPI, Depends, HTTPException, status, Header
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.models import User
 
-import httpx
-from contextlib import asynccontextmanager
-
-
-#
-# --- FastAPI with Async HTTP client for JWK fetching ---
-#
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.state.httpx = httpx.AsyncClient(timeout=10.0)
-    yield
-    await app.state.httpx.aclose()
-
-
-app = FastAPI(lifespan=lifespan)
-
+logger = logging.getLogger(__name__)
 security = HTTPBearer()
-_jwks_client = PyJWKClient(f"{settings.CLERK_JWT_ISSUER}/.well-known/jwks.json")
+_jwks_client: Optional[PyJWKClient] = None
 
 
-def validate_jwt(token: str) -> Dict:
+def _get_jwks_client() -> PyJWKClient:
+    global _jwks_client
+
+    if not settings.CLERK_JWT_ISSUER:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Authentication is not configured",
+        )
+
+    if _jwks_client is None:
+        _jwks_client = PyJWKClient(
+            f"{settings.CLERK_JWT_ISSUER}/.well-known/jwks.json"
+        )
+
+    return _jwks_client
+
+
+def validate_jwt(token: str) -> Dict[str, Any]:
+    jwks_client = _get_jwks_client()
+
     try:
-        signing_key = _jwks_client.get_signing_key_from_jwt(token).key
+        signing_key = jwks_client.get_signing_key_from_jwt(token).key
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -43,15 +47,18 @@ def validate_jwt(token: str) -> Dict:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    decode_kwargs: Dict[str, Any] = {
+        "key": signing_key,
+        "algorithms": ["RS256"],
+        "issuer": settings.CLERK_JWT_ISSUER,
+    }
+    if settings.CLERK_AUDIENCE:
+        decode_kwargs["audience"] = settings.CLERK_AUDIENCE
+    else:
+        decode_kwargs["options"] = {"verify_aud": False}
+
     try:
-        payload = jwt.decode(
-            token,
-            signing_key,
-            algorithms=["RS256"],
-            issuer=settings.CLERK_JWT_ISSUER,
-            audience=settings.CLERK_AUDIENCE,
-        )
-        return payload
+        return jwt.decode(token, **decode_kwargs)
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -78,16 +85,59 @@ def validate_jwt(token: str) -> Dict:
         )
 
 
+async def _fetch_clerk_user(user_id: str, clerk_api_key: str) -> Dict[str, Any]:
+    headers = {"Authorization": f"Bearer {clerk_api_key}"}
+    url = f"https://api.clerk.dev/v1/users/{user_id}"
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get(url, headers=headers)
+
+    if response.status_code != status.HTTP_200_OK:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to get user data from Clerk (status={response.status_code})",
+        )
+
+    return response.json()
+
+
+def _extract_user_identity(clerk_user_data: Dict[str, Any]) -> tuple[str, str]:
+    primary_email_obj = next(
+        (
+            email
+            for email in clerk_user_data.get("email_addresses", [])
+            if email.get("id") == clerk_user_data.get("primary_email_address_id")
+        ),
+        None,
+    )
+    email = primary_email_obj.get("email_address") if primary_email_obj else None
+
+    first_name = clerk_user_data.get("first_name")
+    last_name = clerk_user_data.get("last_name")
+    if first_name and last_name:
+        name = f"{first_name} {last_name}"
+    elif first_name:
+        name = first_name
+    elif last_name:
+        name = last_name
+    else:
+        name = clerk_user_data.get("username")
+
+    if not email or not name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unable to create user: missing required user information from Clerk.",
+        )
+
+    return email, name
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
-    token = credentials.credentials
-    payload = validate_jwt(token)
+    payload = validate_jwt(credentials.credentials)
 
-    print("JWT Payload:", payload)
-
-    # Get user ID from the subject claim
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(
@@ -96,88 +146,50 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Check if user exists in database
     user = db.query(User).filter_by(clerk_user_id=user_id).first()
-    if not user:
-        # We need to fetch user information from Clerk API
-        import httpx
-        import os
+    if user:
+        return user
 
-        # Get Clerk API key from environment
-        clerk_api_key = os.getenv("CLERK_SECRET_KEY")
-        if not clerk_api_key:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Clerk API key not configured",
-            )
+    if not settings.CLERK_SECRET_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Clerk API key not configured",
+        )
 
-        # Fetch user data from Clerk API
-        try:
-            async with httpx.AsyncClient() as client:
-                headers = {"Authorization": f"Bearer {clerk_api_key}"}
-                response = await client.get(
-                    f"https://api.clerk.dev/v1/users/{user_id}",
-                    headers=headers,
-                )
+    try:
+        clerk_user_data = await _fetch_clerk_user(user_id, settings.CLERK_SECRET_KEY)
+        email, name = _extract_user_identity(clerk_user_data)
 
-                if response.status_code != 200:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Failed to get user data from Clerk: {response.text}",
-                    )
-
-                clerk_user_data = response.json()
-
-                # Extract email and name from Clerk data
-                email = None
-                primary_email_obj = next(
-                    (
-                        e
-                        for e in clerk_user_data.get("email_addresses", [])
-                        if e.get("id")
-                        == clerk_user_data.get("primary_email_address_id")
-                    ),
-                    None,
-                )
-
-                if primary_email_obj:
-                    email = primary_email_obj.get("email_address")
-
-                # Get name from Clerk data
-                first_name = clerk_user_data.get("first_name")
-                last_name = clerk_user_data.get("last_name")
-
-                if first_name and last_name:
-                    name = f"{first_name} {last_name}"
-                elif first_name:
-                    name = first_name
-                elif last_name:
-                    name = last_name
-                else:
-                    name = clerk_user_data.get("username")
-
-                if not email or not name:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Unable to create user: Missing required user information from Clerk API.",
-                    )
-
-                # Create the user in our database
-                user = User(clerk_user_id=user_id, email=email, name=name)
-                db.add(user)
-                db.commit()
-                db.refresh(user)
-                print(
-                    f"Created new user from Clerk API: {user.id}, {user.email}, {user.name}"
-                )
-
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error fetching user data from Clerk: {str(e)}",
-            )
-
-    return user
+        user = User(clerk_user_id=user_id, email=email, name=name)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        logger.info("Provisioned user for clerk_user_id=%s", user_id)
+        return user
+    except HTTPException:
+        raise
+    except IntegrityError:
+        db.rollback()
+        user = db.query(User).filter_by(clerk_user_id=user_id).first()
+        if user:
+            return user
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User record conflict while provisioning",
+        )
+    except httpx.HTTPError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to reach authentication provider",
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Unexpected error while provisioning user")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error fetching user data from Clerk",
+        )
 
 
 async def optional_current_user(
@@ -186,10 +198,13 @@ async def optional_current_user(
 ) -> Optional[User]:
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
+
     token = authorization.split(" ", 1)[1]
     try:
         payload = validate_jwt(token)
-        uid = payload.get("sub")
-        return db.query(User).filter_by(clerk_user_id=uid).first()
+        user_id = payload.get("sub")
+        if not user_id:
+            return None
+        return db.query(User).filter_by(clerk_user_id=user_id).first()
     except HTTPException:
         return None

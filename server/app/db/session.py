@@ -1,11 +1,13 @@
-from sqlalchemy import create_engine, inspect, text
+import re
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 from app.core.config import settings
 import logging
-from sqlalchemy.exc import ProgrammingError, OperationalError, SQLAlchemyError
+from sqlalchemy.exc import ProgrammingError, OperationalError
 
 logger = logging.getLogger(__name__)
+DB_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def initialize_database():
@@ -75,6 +77,8 @@ def create_postgres_database(url):
     db_name = url.split("/")[-1]
     if "?" in db_name:  # Handle connection parameters
         db_name = db_name.split("?")[0]
+    if not DB_NAME_PATTERN.fullmatch(db_name):
+        raise ValueError(f"Invalid database name: {db_name}")
 
     # Connect to default postgres database
     postgres_url = url.rsplit("/", 1)[0] + "/postgres"
@@ -84,11 +88,12 @@ def create_postgres_database(url):
         # Check if database exists
         conn.execute(text("COMMIT"))  # Close any open transaction
         result = conn.execute(
-            text(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
+            text("SELECT 1 FROM pg_database WHERE datname = :db_name"),
+            {"db_name": db_name},
         )
         if result.scalar() != 1:
             conn.execute(text("COMMIT"))
-            conn.execute(text(f"CREATE DATABASE {db_name}"))
+            conn.execute(text(f'CREATE DATABASE "{db_name}"'))
             logger.info(f"Created database {db_name}")
 
 

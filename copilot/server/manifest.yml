@@ -24,6 +24,8 @@ network:
 
 variables:
   CLERK_JWT_ISSUER: "https://premium-herring-71.clerk.accounts.dev"
+  # Set ALLOWED_ORIGINS to your production frontend URL(s)
+  # ALLOWED_ORIGINS: "https://yourdomain.com"
 
 secrets:
   CLERK_SECRET_KEY: /copilot/fullstack-template/prod/secrets/CLERK_SECRET_KEY

@@ -27,13 +27,7 @@ import {
 import "./App.css";
 import { API_BASE_URL } from "./config";
 
-// Get Clerk publishable key from environment variable
-const clerkPubKey =
-  "pk_test_cHJlbWl1bS1oZXJyaW5nLTcxLmNsZXJrLmFjY291bnRzLmRldiQ";
-
-if (!clerkPubKey) {
-  throw new Error("Missing VITE_CLERK_PUBLISHABLE_KEY environment variable");
-}
+const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
 // Backend info interface
 interface BackendInfo {
@@ -75,12 +69,6 @@ function LandingContent() {
       if (!isSignedIn || !user) return;
 
       try {
-        console.log("User info from Clerk:", {
-          id: user.id,
-          email: user.primaryEmailAddress?.emailAddress,
-          name: user.fullName || user.username,
-        });
-
         const token = await clerk.session?.getToken();
 
         if (!token) {
@@ -96,8 +84,7 @@ function LandingContent() {
         });
 
         if (response.ok) {
-          const data = await response.json();
-          console.log("User profile fetched successfully:", data);
+          await response.json();
         } else {
           console.error("Failed to fetch user profile:", response.status);
         }
@@ -342,6 +329,23 @@ function LandingContent() {
 }
 
 function App() {
+  if (!clerkPubKey) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-6 bg-background">
+        <Card className="max-w-xl w-full">
+          <CardHeader>
+            <CardTitle>Missing Clerk Configuration</CardTitle>
+            <CardDescription>
+              Set <code>VITE_CLERK_PUBLISHABLE_KEY</code> in <code>client/.env</code>{" "}
+              (or <code>client/.env.local</code>) and restart the Vite dev
+              server.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <ClerkProvider publishableKey={clerkPubKey}>
       <LandingContent />

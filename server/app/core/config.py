@@ -1,10 +1,10 @@
-from pydantic_settings import BaseSettings
-from typing import Optional
-import os
 from functools import lru_cache
+from typing import Optional
 
 # Load .env file before initializing settings
 from dotenv import load_dotenv
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings
 
 load_dotenv()
 
@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     # Core
     PROJECT_NAME: str = "Fullstack Template API"
     API_V1_STR: str = "/api/v1"
+    CORS_ALLOW_ORIGINS: str = ""
 
     # Database - Primary connection string
     DATABASE_URL: Optional[str] = None
@@ -29,7 +30,10 @@ class Settings(BaseSettings):
     DB_NAME: Optional[str] = None
 
     # Clerk Authentication
-    CLERK_JWT_ISSUER: Optional[str] = None
+    CLERK_JWT_ISSUER: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("CLERK_JWT_ISSUER", "CLERK_ISSUER"),
+    )
     CLERK_AUDIENCE: Optional[str] = None
     CLERK_SECRET_KEY: Optional[str] = None
 
@@ -50,8 +54,25 @@ class Settings(BaseSettings):
         ):
             return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
 
-        # Otherwise return the configured DATABASE_URL
-        return self.DATABASE_URL
+        if self.DATABASE_URL:
+            return self.DATABASE_URL
+
+        raise ValueError(
+            "Database configuration missing. Set DATABASE_URL or all DB_* variables."
+        )
+
+    def get_cors_origins(self) -> list[str]:
+        """
+        Return configured CORS origins. Falls back to local dev origins.
+        """
+        if self.CORS_ALLOW_ORIGINS.strip():
+            return [
+                origin.strip()
+                for origin in self.CORS_ALLOW_ORIGINS.split(",")
+                if origin.strip()
+            ]
+
+        return ["http://localhost:3000", "http://127.0.0.1:3000"]
 
 
 @lru_cache

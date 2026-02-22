@@ -1,2 +1,16 @@
 .env
-__pycache__
+.env.*
+**/.env
+**/.env.*
+*.py[cod]
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+*.log
