@@ -90,7 +90,8 @@ The backend handles `checkout.session.completed`,
 `checkout.session.async_payment_succeeded`,
 `checkout.session.async_payment_failed`, and `checkout.session.expired` events.
 Payment rows are stored in `payment_orders` and exposed to the signed-in user at
-`GET /api/v1/payments/orders`.
+`GET /api/v1/payments/orders`. The current user's paid flag is exposed at
+`GET /api/v1/payments/status`.
 
 ## Run Without Docker
 

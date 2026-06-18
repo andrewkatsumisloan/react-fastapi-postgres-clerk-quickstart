@@ -54,5 +54,6 @@ normal app startup.
 - `PUT /api/v1/users/me`
 - `GET /api/v1/payments/config`
 - `POST /api/v1/payments/checkout-session`
+- `GET /api/v1/payments/status`
 - `GET /api/v1/payments/orders`
 - `POST /api/v1/payments/webhook`

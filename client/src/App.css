@@ -227,6 +227,26 @@
   gap: 10px;
 }
 
+.payment-access-flag {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklch, var(--muted) 68%, white);
+  padding: 0 12px;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.payment-access-flag[data-paid="true"] {
+  border-color: color-mix(in oklch, var(--chart-3) 38%, var(--border));
+  background: color-mix(in oklch, var(--chart-3) 13%, white);
+  color: color-mix(in oklch, var(--chart-3) 78%, black);
+}
+
 .payment-row {
   display: flex;
   min-width: 0;

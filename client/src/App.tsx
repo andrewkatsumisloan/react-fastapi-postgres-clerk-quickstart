@@ -8,6 +8,7 @@ import {
 } from "@clerk/clerk-react";
 import {
   Activity,
+  CheckCircle2,
   CreditCard,
   Database,
   ExternalLink,
@@ -88,6 +89,13 @@ interface PaymentOrder {
   price_id: string;
   paid_at?: string | null;
   created_at: string;
+}
+
+interface PaymentAccessStatus {
+  is_paid: boolean;
+  payment_status: string;
+  order_id?: number | null;
+  paid_at?: string | null;
 }
 
 const views: Record<
@@ -216,6 +224,9 @@ function StarterShell() {
   const [formState, setFormState] = useState({ email: "", name: "" });
   const [paymentConfig, setPaymentConfig] = useState<PaymentConfig | null>(null);
   const [paymentOrders, setPaymentOrders] = useState<PaymentOrder[]>([]);
+  const [paymentAccess, setPaymentAccess] = useState<PaymentAccessStatus | null>(
+    null,
+  );
   const [paymentLoading, setPaymentLoading] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [checkoutState, setCheckoutState] = useState<
@@ -316,6 +327,30 @@ function StarterShell() {
     }
   }, [authenticatedRequest, isSignedIn]);
 
+  const loadPaymentStatus = useCallback(async () => {
+    if (!isSignedIn) {
+      setPaymentAccess(null);
+      return;
+    }
+
+    setPaymentLoading(true);
+    setPaymentError(null);
+    try {
+      const response = await authenticatedRequest("/api/v1/payments/status");
+      if (!response.ok) {
+        throw new Error(`Payment status failed with status ${response.status}`);
+      }
+      setPaymentAccess((await response.json()) as PaymentAccessStatus);
+    } catch (error) {
+      setPaymentAccess(null);
+      setPaymentError(
+        error instanceof Error ? error.message : "Unable to load payment status",
+      );
+    } finally {
+      setPaymentLoading(false);
+    }
+  }, [authenticatedRequest, isSignedIn]);
+
   const loadProfile = useCallback(async () => {
     if (!isSignedIn) {
       setProfile(null);
@@ -410,8 +445,9 @@ function StarterShell() {
     if (isLoaded) {
       loadProfile();
       loadPaymentOrders();
+      loadPaymentStatus();
     }
-  }, [isLoaded, loadPaymentOrders, loadProfile]);
+  }, [isLoaded, loadPaymentOrders, loadPaymentStatus, loadProfile]);
 
   const apiStatus = apiSnapshot.loading
     ? "loading"
@@ -436,6 +472,7 @@ function StarterShell() {
     () => user?.fullName ?? user?.username ?? "Signed-in user",
     [user?.fullName, user?.username],
   );
+  const hasPaidAccess = Boolean(paymentAccess?.is_paid);
 
   if (!isLoaded) {
     return (
@@ -578,7 +615,34 @@ function StarterShell() {
         <CardDescription>Stripe Checkout</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
+        <div
+          className="payment-access-flag"
+          data-paid={hasPaidAccess}
+          aria-live="polite"
+        >
+          <CheckCircle2 className="h-4 w-4" />
+          <span>{hasPaidAccess ? "Paid user" : "Not paid"}</span>
+        </div>
+
         <div className="space-y-2">
+          <div className="meta-row">
+            <span className="meta-label">Access flag</span>
+            <span className="meta-value">
+              {isSignedIn
+                ? hasPaidAccess
+                  ? "Paid"
+                  : "Not paid"
+                : "Sign in required"}
+            </span>
+          </div>
+          {paymentAccess?.paid_at && (
+            <div className="meta-row">
+              <span className="meta-label">Paid at</span>
+              <span className="meta-value">
+                {new Date(paymentAccess.paid_at).toLocaleDateString()}
+              </span>
+            </div>
+          )}
           <div className="meta-row">
             <span className="meta-label">Mode</span>
             <span className="meta-value">{paymentConfig?.mode ?? "Unknown"}</span>
@@ -729,7 +793,10 @@ function StarterShell() {
             <Button
               variant="outline"
               className="gap-2"
-              onClick={loadPaymentOrders}
+              onClick={() => {
+                loadPaymentOrders();
+                loadPaymentStatus();
+              }}
               disabled={paymentLoading}
             >
               <RefreshCw className="h-4 w-4" />

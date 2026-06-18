@@ -27,6 +27,15 @@ class CheckoutSessionResponse(BaseModel):
     order_id: int
 
 
+class PaymentStatus(BaseModel):
+    """Current user's paid access flag."""
+
+    is_paid: bool
+    payment_status: str
+    order_id: Optional[int] = None
+    paid_at: Optional[datetime] = None
+
+
 class PaymentOrder(BaseModel):
     """Local payment order state."""
 

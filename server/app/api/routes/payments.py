@@ -17,6 +17,7 @@ from app.schemas.payment import (
     CheckoutSessionResponse,
     PaymentConfig,
     PaymentOrder,
+    PaymentStatus,
 )
 
 router = APIRouter()
@@ -181,6 +182,35 @@ async def list_payment_orders(
         .filter_by(user_id=current_user.id)
         .order_by(PaymentOrderModel.created_at.desc())
         .all()
+    )
+
+
+@router.get("/status", response_model=PaymentStatus)
+async def get_payment_status(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Return whether the current user has a paid Checkout order.
+    """
+    paid_order = (
+        db.query(PaymentOrderModel)
+        .filter_by(user_id=current_user.id, payment_status="paid")
+        .order_by(
+            PaymentOrderModel.paid_at.desc(),
+            PaymentOrderModel.created_at.desc(),
+        )
+        .first()
+    )
+
+    if not paid_order:
+        return PaymentStatus(is_paid=False, payment_status="unpaid")
+
+    return PaymentStatus(
+        is_paid=True,
+        payment_status=paid_order.payment_status,
+        order_id=paid_order.id,
+        paid_at=paid_order.paid_at,
     )
 
 
