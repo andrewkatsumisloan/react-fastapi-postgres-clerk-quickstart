@@ -1,11 +1,28 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ClerkProvider,
   SignInButton,
   UserButton,
-  useUser,
   useClerk,
+  useUser,
 } from "@clerk/clerk-react";
+import {
+  Activity,
+  Database,
+  Home,
+  KeyRound,
+  LogIn,
+  RefreshCw,
+  Save,
+  Server,
+  Settings,
+  ShieldCheck,
+  UserRound,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -13,23 +30,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
-import {
-  ArrowRight,
-  Server,
-  Cloud,
-  Code,
-  Layers,
-  GitBranch,
-} from "lucide-react";
-import "./App.css";
 import { API_BASE_URL } from "./config";
+import "./App.css";
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
-// Backend info interface
+type AppView = "overview" | "profile" | "auth" | "settings";
+
 interface BackendInfo {
   name: string;
   version: string;
@@ -40,290 +47,734 @@ interface BackendInfo {
   };
 }
 
-function LandingContent() {
+interface HealthResponse {
+  status: string;
+}
+
+interface UserProfile {
+  id: number;
+  clerk_user_id: string;
+  email: string;
+  name: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+interface ApiSnapshot {
+  health: HealthResponse | null;
+  info: BackendInfo | null;
+  error: string | null;
+  loading: boolean;
+}
+
+const views: Record<
+  AppView,
+  {
+    label: string;
+    eyebrow: string;
+    title: string;
+    description: string;
+    icon: LucideIcon;
+  }
+> = {
+  overview: {
+    label: "Overview",
+    eyebrow: "Local development",
+    title: "Overview",
+    description: "The full template surface at a glance.",
+    icon: Home,
+  },
+  profile: {
+    label: "Profile",
+    eyebrow: "User workspace",
+    title: "Profile",
+    description: "Edit the current user row created from Clerk identity data.",
+    icon: UserRound,
+  },
+  auth: {
+    label: "Auth",
+    eyebrow: "Session state",
+    title: "Authentication",
+    description: "Inspect the Clerk session and protected API request flow.",
+    icon: KeyRound,
+  },
+  settings: {
+    label: "Settings",
+    eyebrow: "Template config",
+    title: "Settings",
+    description: "Review the client, API, database, and deployment defaults.",
+    icon: Settings,
+  },
+};
+
+const navItems = Object.entries(views) as Array<[AppView, (typeof views)[AppView]]>;
+
+function StatusBadge({
+  status,
+}: {
+  status: "ready" | "loading" | "error" | "idle";
+}) {
+  const labels = {
+    ready: "Ready",
+    loading: "Loading",
+    error: "Error",
+    idle: "Idle",
+  };
+
+  const classes = {
+    ready: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    loading: "border-blue-200 bg-blue-50 text-blue-700",
+    error: "border-red-200 bg-red-50 text-red-700",
+    idle: "border-slate-200 bg-slate-50 text-slate-600",
+  };
+
+  return (
+    <Badge variant="outline" className={`rounded-full px-2.5 ${classes[status]}`}>
+      {labels[status]}
+    </Badge>
+  );
+}
+
+function SkeletonLine({ className = "" }: { className?: string }) {
+  return <span className={`skeleton-line ${className}`} aria-hidden="true" />;
+}
+
+function SignedOutAction({ label = "Sign in to use this" }: { label?: string }) {
+  return (
+    <SignInButton mode="modal">
+      <Button className="w-fit gap-2">
+        <LogIn className="h-4 w-4" />
+        {label}
+      </Button>
+    </SignInButton>
+  );
+}
+
+function StarterShell() {
   const { isLoaded, isSignedIn, user } = useUser();
   const clerk = useClerk();
-  const [backendInfo, setBackendInfo] = useState<BackendInfo | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [activeView, setActiveView] = useState<AppView>("overview");
+  const [apiSnapshot, setApiSnapshot] = useState<ApiSnapshot>({
+    health: null,
+    info: null,
+    error: null,
+    loading: true,
+  });
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">(
+    "idle",
+  );
+  const [formState, setFormState] = useState({ email: "", name: "" });
 
-  useEffect(() => {
-    const fetchBackendInfo = async () => {
-      try {
-        setIsLoading(true);
-        const response = await fetch(`${API_BASE_URL}/api/info`);
-        const data = await response.json();
-        setBackendInfo(data);
-      } catch (error) {
-        console.error("Error fetching backend info:", error);
-      } finally {
-        setIsLoading(false);
+  const activeMeta = views[activeView];
+
+  const loadApiSnapshot = useCallback(async () => {
+    setApiSnapshot((current) => ({ ...current, loading: true, error: null }));
+
+    try {
+      const [healthResponse, infoResponse] = await Promise.all([
+        fetch(`${API_BASE_URL}/api/health`),
+        fetch(`${API_BASE_URL}/api/info`),
+      ]);
+
+      if (!healthResponse.ok || !infoResponse.ok) {
+        throw new Error("API returned an unsuccessful status");
       }
-    };
 
-    fetchBackendInfo();
+      const [health, info] = await Promise.all([
+        healthResponse.json() as Promise<HealthResponse>,
+        infoResponse.json() as Promise<BackendInfo>,
+      ]);
+
+      setApiSnapshot({ health, info, error: null, loading: false });
+    } catch (error) {
+      setApiSnapshot({
+        health: null,
+        info: null,
+        error: error instanceof Error ? error.message : "Unable to reach API",
+        loading: false,
+      });
+    }
   }, []);
 
-  // Fetch user profile when signed in to trigger user creation
-  useEffect(() => {
-    const fetchUserProfile = async () => {
-      if (!isSignedIn || !user) return;
-
-      try {
-        const token = await clerk.session?.getToken();
-
-        if (!token) {
-          console.error("No token available");
-          return;
-        }
-
-        // Simple request with just the Authorization header
-        const response = await fetch(`${API_BASE_URL}/api/v1/users/me`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        if (response.ok) {
-          await response.json();
-        } else {
-          console.error("Failed to fetch user profile:", response.status);
-        }
-      } catch (error) {
-        console.error("Error fetching user profile:", error);
+  const authenticatedRequest = useCallback(
+    async (path: string, init?: RequestInit) => {
+      const token = await clerk.session?.getToken();
+      if (!token) {
+        throw new Error("No Clerk session token is available");
       }
-    };
 
-    if (isSignedIn && user) {
-      fetchUserProfile();
+      return fetch(`${API_BASE_URL}${path}`, {
+        ...init,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          ...init?.headers,
+        },
+      });
+    },
+    [clerk.session],
+  );
+
+  const loadProfile = useCallback(async () => {
+    if (!isSignedIn) {
+      setProfile(null);
+      setFormState({ email: "", name: "" });
+      return;
     }
-  }, [isSignedIn, user, clerk.session]);
+
+    setProfileLoading(true);
+    setProfileError(null);
+    try {
+      const response = await authenticatedRequest("/api/v1/users/me");
+      if (!response.ok) {
+        throw new Error(`Profile request failed with status ${response.status}`);
+      }
+      const nextProfile = (await response.json()) as UserProfile;
+      setProfile(nextProfile);
+      setFormState({
+        email: nextProfile.email,
+        name: nextProfile.name ?? "",
+      });
+    } catch (error) {
+      setProfile(null);
+      setProfileError(
+        error instanceof Error ? error.message : "Unable to load profile",
+      );
+    } finally {
+      setProfileLoading(false);
+    }
+  }, [authenticatedRequest, isSignedIn]);
+
+  const saveProfile = async () => {
+    setSaveState("saving");
+    setProfileError(null);
+
+    try {
+      const response = await authenticatedRequest("/api/v1/users/me", {
+        method: "PUT",
+        body: JSON.stringify({
+          email: formState.email,
+          name: formState.name.trim() || null,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Save failed with status ${response.status}`);
+      }
+
+      const nextProfile = (await response.json()) as UserProfile;
+      setProfile(nextProfile);
+      setFormState({
+        email: nextProfile.email,
+        name: nextProfile.name ?? "",
+      });
+      setSaveState("saved");
+    } catch (error) {
+      setSaveState("error");
+      setProfileError(error instanceof Error ? error.message : "Unable to save");
+    }
+  };
+
+  useEffect(() => {
+    loadApiSnapshot();
+  }, [loadApiSnapshot]);
+
+  useEffect(() => {
+    if (isLoaded) {
+      loadProfile();
+    }
+  }, [isLoaded, loadProfile]);
+
+  const apiStatus = apiSnapshot.loading
+    ? "loading"
+    : apiSnapshot.error
+      ? "error"
+      : "ready";
+  const profileStatus = profileLoading
+    ? "loading"
+    : profileError
+      ? "error"
+      : profile
+        ? "ready"
+        : "idle";
+  const signedInName = useMemo(
+    () => user?.fullName ?? user?.username ?? "Signed-in user",
+    [user?.fullName, user?.username],
+  );
 
   if (!isLoaded) {
     return (
-      <div className="flex items-center justify-center h-screen">
-        Loading user...
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <StatusBadge status="loading" />
       </div>
     );
   }
 
-  return (
-    <div className="min-h-screen bg-background">
-      <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container flex h-16 items-center justify-between py-4">
-          <div className="flex items-center gap-2">
-            <Layers className="h-6 w-6" />
-            <span className="font-bold text-lg">
-              Fullstack React, FastAPI, Postgres
-            </span>
-          </div>
-          <div className="flex items-center gap-4">
-            {isSignedIn ? (
-              <UserButton />
-            ) : (
-              <SignInButton mode="modal">
-                <Button>Sign In</Button>
-              </SignInButton>
-            )}
-          </div>
+  const renderApiCard = () => (
+    <Card className="panel">
+      <CardHeader className="space-y-1">
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Activity className="h-4 w-4 text-primary" />
+            API
+          </CardTitle>
+          <StatusBadge status={apiStatus} />
         </div>
-      </header>
+        <CardDescription className="truncate">{API_BASE_URL}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {apiSnapshot.info ? (
+          <>
+            <div className="meta-row">
+              <span className="meta-label">Service</span>
+              <span className="meta-value">{apiSnapshot.info.name}</span>
+            </div>
+            <div className="meta-row">
+              <span className="meta-label">Version</span>
+              <span className="meta-value">{apiSnapshot.info.version}</span>
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            {apiSnapshot.error ?? "Waiting for API response"}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
 
-      <main>
-        {/* Hero section */}
-        <section className="container py-24 space-y-8 md:space-y-16">
-          <div className="flex flex-col items-center text-center space-y-4">
-            <Badge className="my-6">Production Ready</Badge>
-            <h1 className="text-4xl font-bold tracking-tighter sm:text-5xl md:text-6xl">
-              Fullstack AWS Template
-            </h1>
-            <p className="max-w-[700px] text-muted-foreground md:text-xl/relaxed">
-              A modern, scalable template for building web applications with
-              React, FastAPI, and AWS.
-            </p>
-            <div className="flex flex-wrap items-center justify-center gap-4 mt-8">
-              <Button size="lg" className="gap-1">
-                Get Started <ArrowRight className="h-4 w-4" />
-              </Button>
-              <Button size="lg" variant="outline">
-                Documentation
-              </Button>
+  const renderAuthCard = () => (
+    <Card className="panel">
+      <CardHeader className="space-y-1">
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <ShieldCheck className="h-4 w-4 text-primary" />
+            Auth
+          </CardTitle>
+          <StatusBadge status={isSignedIn ? "ready" : "idle"} />
+        </div>
+        <CardDescription>Clerk session</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {isSignedIn && user ? (
+          <div className="flex min-w-0 items-center gap-3">
+            <Avatar className="h-10 w-10">
+              <AvatarImage src={user.imageUrl} alt={user.username ?? ""} />
+              <AvatarFallback>
+                {(user.firstName ?? user.username ?? "U").charAt(0)}
+              </AvatarFallback>
+            </Avatar>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold">{signedInName}</p>
+              <p className="truncate text-sm text-muted-foreground">
+                {user.primaryEmailAddress?.emailAddress}
+              </p>
             </div>
           </div>
-        </section>
-
-        {/* Features section */}
-        <section className="container py-16 space-y-16">
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 my-4">
-            <Card>
-              <CardHeader>
-                <Code className="h-6 w-6 mb-2 text-primary" />
-                <CardTitle>Frontend Stack</CardTitle>
-                <CardDescription>
-                  Modern, responsive UI with the latest React
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline">React 19</Badge>
-                  <Badge variant="outline">TypeScript</Badge>
-                  <Badge variant="outline">Vite</Badge>
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Built with shadcn/ui components, Clerk Authentication, and
-                  Tailwind CSS.
-                </p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <Server className="h-6 w-6 mb-2 text-primary" />
-                <CardTitle>Backend Stack</CardTitle>
-                <CardDescription>Powerful API with Python</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {isLoading ? (
-                  <p className="text-sm text-muted-foreground">
-                    Loading backend info...
-                  </p>
-                ) : backendInfo ? (
-                  <>
-                    <div className="flex items-center gap-2">
-                      <Badge variant="outline">
-                        {backendInfo.stack.framework}
-                      </Badge>
-                      <Badge variant="outline">
-                        {backendInfo.stack.database}
-                      </Badge>
-                      <Badge variant="outline">Python 3.11</Badge>
-                    </div>
-                    <p className="text-sm text-muted-foreground">
-                      Fast, async API endpoints with comprehensive
-                      documentation.
-                    </p>
-                  </>
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    Could not connect to backend
-                  </p>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <Cloud className="h-6 w-6 mb-2 text-primary" />
-                <CardTitle>Deployment</CardTitle>
-                <CardDescription>Cloud-ready infrastructure</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline">Docker</Badge>
-                  <Badge variant="outline">AWS</Badge>
-                  <Badge variant="outline">CI/CD</Badge>
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Containerized setup with infrastructure as code and automated
-                  deployment pipelines.
-                </p>
-              </CardContent>
-            </Card>
+        ) : (
+          <div className="preview-user">
+            <div className="skeleton-avatar" aria-hidden="true" />
+            <div className="min-w-0 flex-1 space-y-2">
+              <SkeletonLine className="w-36" />
+              <SkeletonLine className="w-48" />
+            </div>
           </div>
-        </section>
-
-        {/* Welcome section for authenticated users */}
-        {isSignedIn && (
-          <section className="container py-16">
-            <Card className="my-4 border-primary/20 bg-primary/5">
-              <CardHeader>
-                <CardTitle className="text-xl ">
-                  Welcome, {user.firstName || user.username}!
-                </CardTitle>
-                <CardDescription>
-                  You're now authenticated with Clerk
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-4">
-                  <Avatar className="h-16 w-16">
-                    <AvatarImage
-                      src={user.imageUrl}
-                      alt={user.username || ""}
-                    />
-                    <AvatarFallback>
-                      {user.firstName?.charAt(0) || user.username?.charAt(0)}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div>
-                    <p className="font-medium">
-                      {user.fullName || user.username}
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      {user.primaryEmailAddress?.emailAddress}
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </section>
         )}
+      </CardContent>
+    </Card>
+  );
 
-        {/* Getting started section */}
-        <section className="container py-16 space-y-8">
-          <div className="flex flex-col items-center gap-4 text-center my-8">
-            <h2 className="text-3xl font-bold tracking-tighter sm:text-4xl">
-              Getting Started
-            </h2>
-            <p className="max-w-[700px] text-muted-foreground md:text-lg/relaxed">
-              This template includes Docker setup for both development and
-              production environments.
-            </p>
+  const renderDatabaseCard = () => (
+    <Card className="panel">
+      <CardHeader className="space-y-1">
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Database className="h-4 w-4 text-primary" />
+            Database
+          </CardTitle>
+          <StatusBadge status={profileStatus} />
+        </div>
+        <CardDescription>Current user row</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {profile ? (
+          <>
+            <div className="meta-row">
+              <span className="meta-label">User ID</span>
+              <span className="meta-value">{profile.id}</span>
+            </div>
+            <div className="meta-row">
+              <span className="meta-label">Created</span>
+              <span className="meta-value">
+                {new Date(profile.created_at).toLocaleDateString()}
+              </span>
+            </div>
+          </>
+        ) : isSignedIn ? (
+          <p className="text-sm text-muted-foreground">
+            {profileError ?? "No profile loaded"}
+          </p>
+        ) : (
+          <>
+            <div className="meta-row">
+              <span className="meta-label">User ID</span>
+              <SkeletonLine className="w-14" />
+            </div>
+            <div className="meta-row">
+              <span className="meta-label">Created</span>
+              <SkeletonLine className="w-24" />
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+
+  const renderProfileEditor = () => (
+    <Card className="panel">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <UserRound className="h-4 w-4 text-primary" />
+          Profile
+        </CardTitle>
+        <CardDescription>/api/v1/users/me</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isSignedIn ? (
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="space-y-2 text-sm font-medium">
+              Email
+              <input
+                className="form-input"
+                type="email"
+                value={formState.email}
+                onChange={(event) =>
+                  setFormState((current) => ({
+                    ...current,
+                    email: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label className="space-y-2 text-sm font-medium">
+              Display name
+              <input
+                className="form-input"
+                value={formState.name}
+                onChange={(event) =>
+                  setFormState((current) => ({
+                    ...current,
+                    name: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <div className="flex flex-wrap items-center gap-2 md:col-span-2">
+              <Button
+                className="gap-2"
+                onClick={saveProfile}
+                disabled={profileLoading || saveState === "saving"}
+              >
+                <Save className="h-4 w-4" />
+                {saveState === "saving" ? "Saving" : "Save"}
+              </Button>
+              <Button
+                variant="outline"
+                className="gap-2"
+                onClick={loadProfile}
+                disabled={profileLoading}
+              >
+                <RefreshCw className="h-4 w-4" />
+                Reload
+              </Button>
+              {saveState === "saved" && (
+                <span className="text-sm text-emerald-700">Saved</span>
+              )}
+              {profileError && (
+                <span className="text-sm text-red-700">{profileError}</span>
+              )}
+            </div>
           </div>
-          <Card className="my-4">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <GitBranch className="h-5 w-5" />
-                Development Workflow
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
+        ) : (
+          <div className="space-y-4">
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="space-y-2 text-sm font-medium text-muted-foreground">
+                Email
+                <input
+                  className="form-input"
+                  type="email"
+                  placeholder="you@example.com"
+                  disabled
+                />
+              </label>
+              <label className="space-y-2 text-sm font-medium text-muted-foreground">
+                Display name
+                <input className="form-input" placeholder="Your name" disabled />
+              </label>
+            </div>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm text-muted-foreground">
-                Check the README for detailed instructions on deployment and
-                customization. This template is designed to get you up and
-                running quickly with best practices.
+                This is the signed-out preview of the editable profile form.
               </p>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm">
-                  View Documentation
-                </Button>
-                <Button variant="outline" size="sm">
-                  GitHub Repository
-                </Button>
-                <Button variant="outline" size="sm">
-                  Report Issues
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </section>
-      </main>
-
-      <footer className="border-t py-6 md:py-8">
-        <div className="container flex flex-col items-center justify-center gap-4 md:flex-row md:justify-between">
-          <div className="flex items-center gap-2">
-            <Layers className="h-5 w-5" />
-            <p className="text-center text-sm leading-loose text-muted-foreground md:text-left">
-              Fullstack Template - Created with React, FastAPI, and AWS
-            </p>
+              <SignedOutAction />
+            </div>
           </div>
-          <div className="flex gap-4">
-            <Button variant="ghost" size="icon">
-              <GitBranch className="h-4 w-4" />
-              <span className="sr-only">GitHub</span>
-            </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+
+  const renderStackCard = () => (
+    <Card className="panel">
+      <CardHeader>
+        <CardTitle className="text-base">Stack</CardTitle>
+        <CardDescription>Runtime</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-wrap gap-2">
+          <Badge variant="outline" className="stack-chip">
+            TypeScript
+          </Badge>
+          <Badge variant="outline" className="stack-chip">
+            Clerk
+          </Badge>
+          <Badge variant="outline" className="stack-chip">
+            Alembic
+          </Badge>
+          <Badge variant="outline" className="stack-chip">
+            Docker
+          </Badge>
+        </div>
+        {apiSnapshot.info ? (
+          <div className="space-y-2">
+            <div className="meta-row">
+              <span className="meta-label">Framework</span>
+              <span className="meta-value">{apiSnapshot.info.stack.framework}</span>
+            </div>
+            <div className="meta-row">
+              <span className="meta-label">Database</span>
+              <span className="meta-value">{apiSnapshot.info.stack.database}</span>
+            </div>
+            <div className="meta-row">
+              <span className="meta-label">Deployment</span>
+              <span className="meta-value">{apiSnapshot.info.stack.deployment}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <SkeletonLine className="w-full" />
+            <SkeletonLine className="w-4/5" />
+            <SkeletonLine className="w-3/5" />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+
+  const renderOverview = () => (
+    <>
+      <section className="status-grid">
+        {renderApiCard()}
+        {renderAuthCard()}
+        {renderDatabaseCard()}
+      </section>
+
+      <section className="workspace-grid">
+        {renderProfileEditor()}
+        {renderStackCard()}
+      </section>
+    </>
+  );
+
+  const renderProfileView = () => (
+    <>
+      <section className="workspace-grid">
+        {renderProfileEditor()}
+        <div className="space-y-4">
+          {renderAuthCard()}
+          {renderDatabaseCard()}
+        </div>
+      </section>
+    </>
+  );
+
+  const renderAuthView = () => (
+    <section className="two-panel-grid">
+      {renderAuthCard()}
+      <Card className="panel">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <KeyRound className="h-4 w-4 text-primary" />
+            Protected Request
+          </CardTitle>
+          <CardDescription>Bearer token sent to FastAPI</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flow-row">
+            <span className="flow-step">1</span>
+            <div>
+              <p className="text-sm font-semibold">Clerk issues session token</p>
+              <p className="text-sm text-muted-foreground">
+                {isSignedIn ? "Session available" : "Preview only while signed out"}
+              </p>
+            </div>
+          </div>
+          <div className="flow-row">
+            <span className="flow-step">2</span>
+            <div>
+              <p className="text-sm font-semibold">React calls /api/v1/users/me</p>
+              <p className="text-sm text-muted-foreground">
+                Authorization header is attached before the request is sent.
+              </p>
+            </div>
+          </div>
+          <div className="flow-row">
+            <span className="flow-step">3</span>
+            <div>
+              <p className="text-sm font-semibold">FastAPI validates JWT</p>
+              <p className="text-sm text-muted-foreground">
+                The database row is created or updated for the current user.
+              </p>
+            </div>
+          </div>
+          {!isSignedIn && <SignedOutAction label="Sign in to test auth" />}
+        </CardContent>
+      </Card>
+    </section>
+  );
+
+  const renderSettingsView = () => (
+    <section className="two-panel-grid">
+      <Card className="panel">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Settings className="h-4 w-4 text-primary" />
+            Client Settings
+          </CardTitle>
+          <CardDescription>Runtime values visible to the browser</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="meta-row">
+            <span className="meta-label">API base</span>
+            <span className="meta-value">{API_BASE_URL}</span>
+          </div>
+          <div className="meta-row">
+            <span className="meta-label">Clerk key</span>
+            <span className="meta-value">Configured</span>
+          </div>
+          <div className="meta-row">
+            <span className="meta-label">Auth state</span>
+            <span className="meta-value">
+              {isSignedIn ? "Authenticated" : "Unauthenticated preview"}
+            </span>
+          </div>
+        </CardContent>
+      </Card>
+      {renderStackCard()}
+    </section>
+  );
+
+  return (
+    <div className="app-shell">
+      <aside className="app-sidebar">
+        <div className="flex items-center gap-3">
+          <div className="brand-mark">
+            <Server className="h-5 w-5" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase text-muted-foreground">
+              Starter
+            </p>
+            <h1 className="truncate text-base font-semibold">Fullstack App</h1>
           </div>
         </div>
-      </footer>
+
+        <nav className="space-y-1" aria-label="App views">
+          {navItems.map(([view, item]) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={view}
+                type="button"
+                className="nav-item"
+                data-active={activeView === view}
+                onClick={() => setActiveView(view)}
+              >
+                <Icon className="h-4 w-4" />
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="sidebar-footer mt-auto rounded-lg border bg-card/70 p-3">
+          <p className="text-xs font-medium text-muted-foreground">API base</p>
+          <p className="mt-1 truncate text-sm font-semibold">{API_BASE_URL}</p>
+        </div>
+      </aside>
+
+      <div className="app-main">
+        <header className="app-topbar">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase text-muted-foreground">
+              {activeMeta.eyebrow}
+            </p>
+            <h2 className="truncate text-lg font-semibold">{activeMeta.title}</h2>
+          </div>
+          <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              className="topbar-refresh gap-2"
+              onClick={loadApiSnapshot}
+            >
+              <RefreshCw className="h-4 w-4" />
+              Refresh
+            </Button>
+            <div className="topbar-auth">
+              {isSignedIn ? (
+                <UserButton />
+              ) : (
+                <SignInButton mode="modal">
+                  <Button className="gap-2">
+                    <LogIn className="h-4 w-4" />
+                    Sign in
+                  </Button>
+                </SignInButton>
+              )}
+            </div>
+          </div>
+        </header>
+
+        <main className="app-content">
+          <section className="mb-6 flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline" className="stack-chip">
+                React
+              </Badge>
+              <Badge variant="outline" className="stack-chip">
+                FastAPI
+              </Badge>
+              <Badge variant="outline" className="stack-chip">
+                Postgres
+              </Badge>
+            </div>
+            <h2 className="text-2xl font-semibold tracking-tight">
+              {activeMeta.title}
+            </h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              {activeMeta.description}
+            </p>
+          </section>
+
+          {activeView === "overview" && renderOverview()}
+          {activeView === "profile" && renderProfileView()}
+          {activeView === "auth" && renderAuthView()}
+          {activeView === "settings" && renderSettingsView()}
+        </main>
+      </div>
     </div>
   );
 }
@@ -331,14 +782,13 @@ function LandingContent() {
 function App() {
   if (!clerkPubKey) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-6 bg-background">
-        <Card className="max-w-xl w-full">
+      <div className="flex min-h-screen items-center justify-center bg-background p-6">
+        <Card className="w-full max-w-xl">
           <CardHeader>
             <CardTitle>Missing Clerk Configuration</CardTitle>
             <CardDescription>
               Set <code>VITE_CLERK_PUBLISHABLE_KEY</code> in <code>client/.env</code>{" "}
-              (or <code>client/.env.local</code>) and restart the Vite dev
-              server.
+              and restart the Vite dev server.
             </CardDescription>
           </CardHeader>
         </Card>
@@ -348,7 +798,7 @@ function App() {
 
   return (
     <ClerkProvider publishableKey={clerkPubKey}>
-      <LandingContent />
+      <StarterShell />
     </ClerkProvider>
   );
 }

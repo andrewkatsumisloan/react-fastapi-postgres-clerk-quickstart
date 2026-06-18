@@ -1,6 +1,9 @@
 import re
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+from typing import Optional
+
+from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 from app.core.config import settings
 import logging
@@ -8,23 +11,27 @@ from sqlalchemy.exc import ProgrammingError, OperationalError
 
 logger = logging.getLogger(__name__)
 DB_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+engine: Optional[Engine] = None
+SessionLocal: Optional[sessionmaker[Session]] = None
 
 
 def initialize_database():
-    """Initialize the database connection and create tables"""
-    try:
-        # Get the database URL from settings
-        database_url = settings.get_database_url()
+    """Initialize the database connection and session factory."""
+    global engine, SessionLocal
 
-        # Mask password for logging
-        masked_url = database_url
-        if settings.DB_PASSWORD:
-            masked_url = database_url.replace(settings.DB_PASSWORD, "****")
+    if engine is not None and SessionLocal is not None:
+        return engine, SessionLocal
+
+    database_url = settings.get_database_url()
+    parsed_url = make_url(database_url)
+
+    try:
+        masked_url = parsed_url.render_as_string(hide_password=True)
         logger.info(f"Connecting to database at: {masked_url}")
 
-        # Configure engine based on database type
-        if "postgres" in database_url or "postgresql" in database_url:
-            engine = create_engine(
+        is_postgres = parsed_url.drivername.startswith("postgres")
+        if is_postgres:
+            db_engine = create_engine(
                 database_url,
                 pool_size=5,
                 max_overflow=10,
@@ -32,31 +39,25 @@ def initialize_database():
                 poolclass=QueuePool,
             )
         else:
-            engine = create_engine(database_url)
+            db_engine = create_engine(database_url)
 
         # Create session factory
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        session_factory = sessionmaker(
+            autocommit=False, autoflush=False, bind=db_engine
+        )
 
         # Test the connection
-        with engine.connect() as conn:
+        with db_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
             logger.info("Database connection established successfully")
 
-        # Create tables
-        from app.models.models import User
-        from app.db.base_class import Base
-
-        # Create tables
-        Base.metadata.create_all(bind=engine)
-        logger.info("Database tables initialized")
-
+        engine = db_engine
+        SessionLocal = session_factory
         return engine, SessionLocal
 
     except (OperationalError, ProgrammingError) as e:
         # Handle database doesn't exist case
-        if "does not exist" in str(e) and (
-            "postgres" in database_url or "postgresql" in database_url
-        ):
+        if "does not exist" in str(e) and parsed_url.drivername.startswith("postgres"):
             try:
                 create_postgres_database(database_url)
                 # Try initialization again after creating database
@@ -73,15 +74,15 @@ def initialize_database():
 
 def create_postgres_database(url):
     """Create PostgreSQL database if it doesn't exist"""
-    # Extract database name from URL
-    db_name = url.split("/")[-1]
-    if "?" in db_name:  # Handle connection parameters
-        db_name = db_name.split("?")[0]
+    parsed_url = make_url(url)
+    db_name = parsed_url.database
+    if not db_name:
+        raise ValueError("Database URL must include a database name")
     if not DB_NAME_PATTERN.fullmatch(db_name):
         raise ValueError(f"Invalid database name: {db_name}")
 
     # Connect to default postgres database
-    postgres_url = url.rsplit("/", 1)[0] + "/postgres"
+    postgres_url = parsed_url.set(database="postgres")
     engine = create_engine(postgres_url)
 
     with engine.connect() as conn:
@@ -97,14 +98,16 @@ def create_postgres_database(url):
             logger.info(f"Created database {db_name}")
 
 
-# Initialize database connection and session factory
-engine, SessionLocal = initialize_database()
+def get_session_factory() -> sessionmaker[Session]:
+    """Return the initialized session factory, creating it if needed."""
+    _, session_factory = initialize_database()
+    return session_factory
 
 
 # Dependency for routes
 def get_db():
     """Dependency to get a database session"""
-    db = SessionLocal()
+    db = get_session_factory()()
     try:
         yield db
     finally:

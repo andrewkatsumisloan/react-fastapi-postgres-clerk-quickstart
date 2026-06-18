@@ -1,20 +1,28 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 
 from app.api.api import api_router
 from app.core.config import settings
+from app.db.session import initialize_database
 
 # Import models to ensure they are registered with SQLAlchemy
 from app.models import models
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
 
-app = FastAPI(title="Fullstack Template API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    initialize_database()
+    yield
+
+
+app = FastAPI(title="Fullstack Template API", lifespan=lifespan)
 
 
 # Configure CORS

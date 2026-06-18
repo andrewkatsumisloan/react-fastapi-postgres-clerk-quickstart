@@ -101,7 +101,34 @@ async def _fetch_clerk_user(user_id: str, clerk_api_key: str) -> Dict[str, Any]:
     return response.json()
 
 
-def _extract_user_identity(clerk_user_data: Dict[str, Any]) -> tuple[str, str]:
+def _extract_name(data: Dict[str, Any]) -> Optional[str]:
+    name = data.get("name") or data.get("full_name")
+    if name:
+        return str(name)
+
+    first_name = data.get("first_name") or data.get("given_name")
+    last_name = data.get("last_name") or data.get("family_name")
+    if first_name and last_name:
+        return f"{first_name} {last_name}"
+    if first_name:
+        return str(first_name)
+    if last_name:
+        return str(last_name)
+
+    username = data.get("username")
+    return str(username) if username else None
+
+
+def _extract_claim_identity(payload: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    email = (
+        payload.get("email")
+        or payload.get("primary_email_address")
+        or payload.get("email_address")
+    )
+    return (str(email), _extract_name(payload)) if email else (None, _extract_name(payload))
+
+
+def _extract_user_identity(clerk_user_data: Dict[str, Any]) -> tuple[str, Optional[str]]:
     primary_email_obj = next(
         (
             email
@@ -111,25 +138,16 @@ def _extract_user_identity(clerk_user_data: Dict[str, Any]) -> tuple[str, str]:
         None,
     )
     email = primary_email_obj.get("email_address") if primary_email_obj else None
+    if not email and clerk_user_data.get("email_addresses"):
+        email = clerk_user_data["email_addresses"][0].get("email_address")
 
-    first_name = clerk_user_data.get("first_name")
-    last_name = clerk_user_data.get("last_name")
-    if first_name and last_name:
-        name = f"{first_name} {last_name}"
-    elif first_name:
-        name = first_name
-    elif last_name:
-        name = last_name
-    else:
-        name = clerk_user_data.get("username")
-
-    if not email or not name:
+    if not email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Unable to create user: missing required user information from Clerk.",
+            detail="Unable to create user: missing email address from Clerk.",
         )
 
-    return email, name
+    return email, _extract_name(clerk_user_data)
 
 
 async def get_current_user(
@@ -150,15 +168,19 @@ async def get_current_user(
     if user:
         return user
 
-    if not settings.CLERK_SECRET_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Clerk API key not configured",
-        )
-
     try:
-        clerk_user_data = await _fetch_clerk_user(user_id, settings.CLERK_SECRET_KEY)
-        email, name = _extract_user_identity(clerk_user_data)
+        email, name = _extract_claim_identity(payload)
+        if not email:
+            if not settings.CLERK_SECRET_KEY:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=(
+                        "Clerk API key not configured. Set CLERK_SECRET_KEY or "
+                        "include an email claim in the Clerk JWT template."
+                    ),
+                )
+            clerk_user_data = await _fetch_clerk_user(user_id, settings.CLERK_SECRET_KEY)
+            email, name = _extract_user_identity(clerk_user_data)
 
         user = User(clerk_user_id=user_id, email=email, name=name)
         db.add(user)

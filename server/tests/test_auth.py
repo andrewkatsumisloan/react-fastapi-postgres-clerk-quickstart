@@ -21,8 +21,21 @@ class QueryStub:
 
 
 class DBStub:
+    def __init__(self):
+        self.added_user = None
+        self.did_commit = False
+
     def query(self, _model):
         return QueryStub()
+
+    def add(self, user):
+        self.added_user = user
+
+    def commit(self):
+        self.did_commit = True
+
+    def refresh(self, _user):
+        pass
 
 
 class FakeResponse:
@@ -54,6 +67,44 @@ class AuthTests(unittest.TestCase):
                         asyncio.run(auth.get_current_user(credentials=creds, db=DBStub()))
 
         self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_get_current_user_provisions_from_jwt_claims_without_clerk_secret(self):
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="token")
+        db = DBStub()
+
+        with patch.object(
+            auth,
+            "validate_jwt",
+            return_value={
+                "sub": "user_123",
+                "email": "user@example.com",
+                "given_name": "Launch",
+                "family_name": "User",
+            },
+        ):
+            with patch.object(auth.settings, "CLERK_SECRET_KEY", None):
+                user = asyncio.run(auth.get_current_user(credentials=creds, db=db))
+
+        self.assertEqual(user.clerk_user_id, "user_123")
+        self.assertEqual(user.email, "user@example.com")
+        self.assertEqual(user.name, "Launch User")
+        self.assertTrue(db.did_commit)
+
+    def test_extract_user_identity_allows_missing_name(self):
+        email, name = auth._extract_user_identity(
+            {
+                "primary_email_address_id": "email_123",
+                "email_addresses": [
+                    {
+                        "id": "email_123",
+                        "email_address": "user@example.com",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(email, "user@example.com")
+        self.assertIsNone(name)
 
 
 if __name__ == "__main__":
