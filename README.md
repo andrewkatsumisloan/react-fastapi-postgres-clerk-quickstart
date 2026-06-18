@@ -6,6 +6,7 @@ A launch-ready starter for authenticated fullstack apps:
 - Clerk for authentication
 - FastAPI with SQLAlchemy
 - Postgres with Alembic migrations
+- Optional Stripe Checkout payments
 - Docker Compose for local development
 - Production Compose profile with nginx serving the SPA and proxying `/api`
 
@@ -15,6 +16,7 @@ A launch-ready starter for authenticated fullstack apps:
 - Node 20 if running the client outside Docker
 - Python 3.11 if running the API outside Docker
 - A Clerk application
+- A Stripe account if enabling payments
 
 ## Environment
 
@@ -39,6 +41,17 @@ CLERK_SECRET_KEY=sk_test_...
 Local Docker Compose supplies the Postgres settings for the API, so `DATABASE_URL`
 is optional for local Docker development.
 
+Stripe is optional. The app boots without Stripe keys and shows payments as
+disabled until these server variables are set:
+
+```bash
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_DEFAULT_PRICE_ID=price_...
+STRIPE_PAYMENT_MODE=payment
+STRIPE_FRONTEND_URL=http://localhost:3000
+```
+
 ## Run Locally With Docker
 
 ```bash
@@ -53,6 +66,31 @@ Useful URLs:
 - App: `http://localhost:3000`
 - API docs: `http://localhost:8000/docs`
 - API health: `http://localhost:8000/api/health`
+
+## Stripe Payments
+
+The starter uses Stripe-hosted Checkout Sessions so card data never touches the
+React or FastAPI app.
+
+To enable local payments:
+
+1. Create a Stripe product and price, then set `STRIPE_DEFAULT_PRICE_ID` in
+   `server/.env`.
+2. Set `STRIPE_SECRET_KEY` in `server/.env`.
+3. Forward webhooks locally:
+
+   ```bash
+   stripe listen --forward-to localhost:8000/api/v1/payments/webhook
+   ```
+
+4. Copy the printed `whsec_...` value to `STRIPE_WEBHOOK_SECRET`.
+5. Restart the API and open the Payments view in the app.
+
+The backend handles `checkout.session.completed`,
+`checkout.session.async_payment_succeeded`,
+`checkout.session.async_payment_failed`, and `checkout.session.expired` events.
+Payment rows are stored in `payment_orders` and exposed to the signed-in user at
+`GET /api/v1/payments/orders`.
 
 ## Run Without Docker
 
@@ -117,6 +155,8 @@ Production variables:
 - `CLERK_SECRET_KEY`
 - `VITE_API_BASE_URL` optional; leave blank for same-origin `/api`
 - `CLERK_AUDIENCE` optional
+- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and `STRIPE_DEFAULT_PRICE_ID`
+  optional; set all three to enable Checkout
 - `CORS_ALLOW_ORIGINS` optional for direct cross-origin API calls
 
 ## Project Layout

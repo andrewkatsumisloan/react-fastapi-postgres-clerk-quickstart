@@ -33,9 +33,26 @@ CLERK_SECRET_KEY=sk_test_...
 `CLERK_SECRET_KEY` is used only when a JWT does not include enough user claims to
 create the local user row.
 
+Optional Stripe settings:
+
+```bash
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_DEFAULT_PRICE_ID=price_...
+STRIPE_PAYMENT_MODE=payment
+STRIPE_FRONTEND_URL=http://localhost:3000
+```
+
+Leave Stripe settings blank to keep the payments API disabled while preserving
+normal app startup.
+
 ## API
 
 - `GET /api/health`
 - `GET /api/info`
 - `GET /api/v1/users/me`
 - `PUT /api/v1/users/me`
+- `GET /api/v1/payments/config`
+- `POST /api/v1/payments/checkout-session`
+- `GET /api/v1/payments/orders`
+- `POST /api/v1/payments/webhook`

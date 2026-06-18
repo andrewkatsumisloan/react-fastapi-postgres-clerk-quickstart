@@ -8,11 +8,14 @@ import {
 } from "@clerk/clerk-react";
 import {
   Activity,
+  CreditCard,
   Database,
+  ExternalLink,
   Home,
   KeyRound,
   LogIn,
   RefreshCw,
+  ReceiptText,
   Save,
   Server,
   Settings,
@@ -35,7 +38,7 @@ import "./App.css";
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
-type AppView = "overview" | "profile" | "auth" | "settings";
+type AppView = "overview" | "profile" | "payments" | "auth" | "settings";
 
 interface BackendInfo {
   name: string;
@@ -67,6 +70,26 @@ interface ApiSnapshot {
   loading: boolean;
 }
 
+interface PaymentConfig {
+  enabled: boolean;
+  default_price_configured: boolean;
+  webhook_configured: boolean;
+  mode: string;
+}
+
+interface PaymentOrder {
+  id: number;
+  stripe_checkout_session_id: string;
+  mode: string;
+  status: string;
+  payment_status: string;
+  currency?: string | null;
+  amount_total?: number | null;
+  price_id: string;
+  paid_at?: string | null;
+  created_at: string;
+}
+
 const views: Record<
   AppView,
   {
@@ -90,6 +113,13 @@ const views: Record<
     title: "Profile",
     description: "Edit the current user row created from Clerk identity data.",
     icon: UserRound,
+  },
+  payments: {
+    label: "Payments",
+    eyebrow: "Stripe Checkout",
+    title: "Payments",
+    description: "Create hosted Checkout Sessions for signed-in users.",
+    icon: CreditCard,
   },
   auth: {
     label: "Auth",
@@ -139,6 +169,17 @@ function SkeletonLine({ className = "" }: { className?: string }) {
   return <span className={`skeleton-line ${className}`} aria-hidden="true" />;
 }
 
+function formatMoney(amount: number | null | undefined, currency?: string | null) {
+  if (amount == null || !currency) {
+    return "Pending";
+  }
+
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: currency.toUpperCase(),
+  }).format(amount / 100);
+}
+
 function SignedOutAction({ label = "Sign in to use this" }: { label?: string }) {
   return (
     <SignInButton mode="modal">
@@ -153,7 +194,13 @@ function SignedOutAction({ label = "Sign in to use this" }: { label?: string }) 
 function StarterShell() {
   const { isLoaded, isSignedIn, user } = useUser();
   const clerk = useClerk();
-  const [activeView, setActiveView] = useState<AppView>("overview");
+  const checkoutResult = useMemo(
+    () => new URLSearchParams(window.location.search).get("checkout"),
+    [],
+  );
+  const [activeView, setActiveView] = useState<AppView>(
+    checkoutResult ? "payments" : "overview",
+  );
   const [apiSnapshot, setApiSnapshot] = useState<ApiSnapshot>({
     health: null,
     info: null,
@@ -167,6 +214,13 @@ function StarterShell() {
     "idle",
   );
   const [formState, setFormState] = useState({ email: "", name: "" });
+  const [paymentConfig, setPaymentConfig] = useState<PaymentConfig | null>(null);
+  const [paymentOrders, setPaymentOrders] = useState<PaymentOrder[]>([]);
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [checkoutState, setCheckoutState] = useState<
+    "idle" | "starting" | "error"
+  >("idle");
 
   const activeMeta = views[activeView];
 
@@ -217,6 +271,50 @@ function StarterShell() {
     },
     [clerk.session],
   );
+
+  const loadPaymentConfig = useCallback(async () => {
+    setPaymentLoading(true);
+    setPaymentError(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/payments/config`);
+      if (!response.ok) {
+        throw new Error(`Payment config failed with status ${response.status}`);
+      }
+      setPaymentConfig((await response.json()) as PaymentConfig);
+    } catch (error) {
+      setPaymentConfig(null);
+      setPaymentError(
+        error instanceof Error ? error.message : "Unable to load payments",
+      );
+    } finally {
+      setPaymentLoading(false);
+    }
+  }, []);
+
+  const loadPaymentOrders = useCallback(async () => {
+    if (!isSignedIn) {
+      setPaymentOrders([]);
+      return;
+    }
+
+    setPaymentLoading(true);
+    setPaymentError(null);
+    try {
+      const response = await authenticatedRequest("/api/v1/payments/orders");
+      if (!response.ok) {
+        throw new Error(`Payment orders failed with status ${response.status}`);
+      }
+      setPaymentOrders((await response.json()) as PaymentOrder[]);
+    } catch (error) {
+      setPaymentOrders([]);
+      setPaymentError(
+        error instanceof Error ? error.message : "Unable to load payment orders",
+      );
+    } finally {
+      setPaymentLoading(false);
+    }
+  }, [authenticatedRequest, isSignedIn]);
 
   const loadProfile = useCallback(async () => {
     if (!isSignedIn) {
@@ -278,15 +376,42 @@ function StarterShell() {
     }
   };
 
+  const startCheckout = async () => {
+    setCheckoutState("starting");
+    setPaymentError(null);
+
+    try {
+      const response = await authenticatedRequest(
+        "/api/v1/payments/checkout-session",
+        {
+          method: "POST",
+          body: JSON.stringify({}),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`Checkout failed with status ${response.status}`);
+      }
+      const data = (await response.json()) as { checkout_url: string };
+      window.location.assign(data.checkout_url);
+    } catch (error) {
+      setCheckoutState("error");
+      setPaymentError(
+        error instanceof Error ? error.message : "Unable to start Checkout",
+      );
+    }
+  };
+
   useEffect(() => {
     loadApiSnapshot();
-  }, [loadApiSnapshot]);
+    loadPaymentConfig();
+  }, [loadApiSnapshot, loadPaymentConfig]);
 
   useEffect(() => {
     if (isLoaded) {
       loadProfile();
+      loadPaymentOrders();
     }
-  }, [isLoaded, loadProfile]);
+  }, [isLoaded, loadPaymentOrders, loadProfile]);
 
   const apiStatus = apiSnapshot.loading
     ? "loading"
@@ -298,6 +423,13 @@ function StarterShell() {
     : profileError
       ? "error"
       : profile
+        ? "ready"
+        : "idle";
+  const paymentStatus = paymentLoading
+    ? "loading"
+    : paymentError
+      ? "error"
+      : paymentConfig?.enabled
         ? "ready"
         : "idle";
   const signedInName = useMemo(
@@ -433,6 +565,61 @@ function StarterShell() {
     </Card>
   );
 
+  const renderPaymentCard = () => (
+    <Card className="panel">
+      <CardHeader className="space-y-1">
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <CreditCard className="h-4 w-4 text-primary" />
+            Payments
+          </CardTitle>
+          <StatusBadge status={paymentStatus} />
+        </div>
+        <CardDescription>Stripe Checkout</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="space-y-2">
+          <div className="meta-row">
+            <span className="meta-label">Mode</span>
+            <span className="meta-value">{paymentConfig?.mode ?? "Unknown"}</span>
+          </div>
+          <div className="meta-row">
+            <span className="meta-label">Default price</span>
+            <span className="meta-value">
+              {paymentConfig?.default_price_configured ? "Configured" : "Missing"}
+            </span>
+          </div>
+          <div className="meta-row">
+            <span className="meta-label">Webhook</span>
+            <span className="meta-value">
+              {paymentConfig?.webhook_configured ? "Configured" : "Missing"}
+            </span>
+          </div>
+        </div>
+
+        {isSignedIn ? (
+          <Button
+            className="w-full gap-2"
+            onClick={startCheckout}
+            disabled={!paymentConfig?.enabled || checkoutState === "starting"}
+          >
+            <ExternalLink className="h-4 w-4" />
+            {checkoutState === "starting" ? "Opening Checkout" : "Open Checkout"}
+          </Button>
+        ) : (
+          <SignedOutAction label="Sign in to pay" />
+        )}
+
+        {!paymentConfig?.enabled && (
+          <p className="text-sm text-muted-foreground">
+            Add Stripe server settings to enable Checkout.
+          </p>
+        )}
+        {paymentError && <p className="text-sm text-red-700">{paymentError}</p>}
+      </CardContent>
+    </Card>
+  );
+
   const renderProfileEditor = () => (
     <Card className="panel">
       <CardHeader>
@@ -527,6 +714,70 @@ function StarterShell() {
     </Card>
   );
 
+  const renderPaymentOrders = () => (
+    <Card className="panel">
+      <CardHeader>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ReceiptText className="h-4 w-4 text-primary" />
+              Payment Orders
+            </CardTitle>
+            <CardDescription>/api/v1/payments/orders</CardDescription>
+          </div>
+          {isSignedIn && (
+            <Button
+              variant="outline"
+              className="gap-2"
+              onClick={loadPaymentOrders}
+              disabled={paymentLoading}
+            >
+              <RefreshCw className="h-4 w-4" />
+              Reload
+            </Button>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent>
+        {!isSignedIn ? (
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Sign in to view Checkout Sessions for the current user.
+            </p>
+            <SignedOutAction label="Sign in to view payments" />
+          </div>
+        ) : paymentOrders.length > 0 ? (
+          <div className="payment-list">
+            {paymentOrders.map((order) => (
+              <div className="payment-row" key={order.id}>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold">
+                    {formatMoney(order.amount_total, order.currency)}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {order.stripe_checkout_session_id}
+                  </p>
+                </div>
+                <div className="payment-row-meta">
+                  <Badge variant="outline" className="stack-chip">
+                    {order.payment_status}
+                  </Badge>
+                  <span className="text-xs text-muted-foreground">
+                    {new Date(order.created_at).toLocaleDateString()}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            No payment orders for this user yet.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+
   const renderStackCard = () => (
     <Card className="panel">
       <CardHeader>
@@ -580,6 +831,7 @@ function StarterShell() {
         {renderApiCard()}
         {renderAuthCard()}
         {renderDatabaseCard()}
+        {renderPaymentCard()}
       </section>
 
       <section className="workspace-grid">
@@ -599,6 +851,35 @@ function StarterShell() {
         </div>
       </section>
     </>
+  );
+
+  const renderPaymentsView = () => (
+    <section className="workspace-grid">
+      <div className="space-y-4">
+        {checkoutResult === "success" && (
+          <Card className="panel">
+            <CardHeader>
+              <CardTitle className="text-base">Checkout Complete</CardTitle>
+              <CardDescription>
+                Stripe returned to the app. Webhooks update the final payment state.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        )}
+        {checkoutResult === "canceled" && (
+          <Card className="panel">
+            <CardHeader>
+              <CardTitle className="text-base">Checkout Canceled</CardTitle>
+              <CardDescription>
+                The Checkout Session was not completed.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        )}
+        {renderPaymentOrders()}
+      </div>
+      <div className="space-y-4">{renderPaymentCard()}</div>
+    </section>
   );
 
   const renderAuthView = () => (
@@ -669,6 +950,12 @@ function StarterShell() {
             <span className="meta-label">Auth state</span>
             <span className="meta-value">
               {isSignedIn ? "Authenticated" : "Unauthenticated preview"}
+            </span>
+          </div>
+          <div className="meta-row">
+            <span className="meta-label">Stripe</span>
+            <span className="meta-value">
+              {paymentConfig?.enabled ? "Enabled" : "Disabled"}
             </span>
           </div>
         </CardContent>
@@ -771,6 +1058,7 @@ function StarterShell() {
 
           {activeView === "overview" && renderOverview()}
           {activeView === "profile" && renderProfileView()}
+          {activeView === "payments" && renderPaymentsView()}
           {activeView === "auth" && renderAuthView()}
           {activeView === "settings" && renderSettingsView()}
         </main>

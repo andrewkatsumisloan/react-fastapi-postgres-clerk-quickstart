@@ -103,7 +103,7 @@
 .status-grid {
   display: grid;
   min-width: 0;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
 }
 
@@ -222,6 +222,30 @@
   font-weight: 700;
 }
 
+.payment-list {
+  display: grid;
+  gap: 10px;
+}
+
+.payment-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklch, var(--card) 90%, white);
+  padding: 12px;
+}
+
+.payment-row-meta {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+}
+
 @media (max-width: 960px) {
   .app-shell {
     display: block;
@@ -252,6 +276,11 @@
   .workspace-grid,
   .two-panel-grid {
     grid-template-columns: 1fr;
+  }
+
+  .payment-row {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

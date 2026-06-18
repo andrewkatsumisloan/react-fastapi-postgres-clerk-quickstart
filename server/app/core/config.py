@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     CLERK_AUDIENCE: Optional[str] = None
     CLERK_SECRET_KEY: Optional[str] = None
 
+    # Stripe Payments
+    STRIPE_SECRET_KEY: Optional[str] = None
+    STRIPE_WEBHOOK_SECRET: Optional[str] = None
+    STRIPE_DEFAULT_PRICE_ID: Optional[str] = None
+    STRIPE_PAYMENT_MODE: str = "payment"
+    STRIPE_SUCCESS_URL: Optional[str] = None
+    STRIPE_CANCEL_URL: Optional[str] = None
+    STRIPE_FRONTEND_URL: str = "http://localhost:3000"
+    STRIPE_AUTOMATIC_TAX_ENABLED: bool = False
+
     model_config = {
         "case_sensitive": True,
         "env_file": ".env",
@@ -73,6 +83,36 @@ class Settings(BaseSettings):
             ]
 
         return ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+    def is_stripe_enabled(self) -> bool:
+        """Return whether Stripe Checkout can be used."""
+        return bool(
+            self.STRIPE_SECRET_KEY
+            and self.STRIPE_WEBHOOK_SECRET
+            and self.STRIPE_DEFAULT_PRICE_ID
+        )
+
+    def get_stripe_payment_mode(self) -> str:
+        """Return a Checkout-supported payment mode."""
+        mode = self.STRIPE_PAYMENT_MODE.strip().lower()
+        if mode not in {"payment", "subscription"}:
+            raise ValueError("STRIPE_PAYMENT_MODE must be 'payment' or 'subscription'")
+        return mode
+
+    def get_stripe_success_url(self) -> str:
+        if self.STRIPE_SUCCESS_URL:
+            return self.STRIPE_SUCCESS_URL
+        frontend_url = self.STRIPE_FRONTEND_URL or "http://localhost:3000"
+        return (
+            f"{frontend_url.rstrip('/')}"
+            "/?checkout=success&session_id={CHECKOUT_SESSION_ID}"
+        )
+
+    def get_stripe_cancel_url(self) -> str:
+        if self.STRIPE_CANCEL_URL:
+            return self.STRIPE_CANCEL_URL
+        frontend_url = self.STRIPE_FRONTEND_URL or "http://localhost:3000"
+        return f"{frontend_url.rstrip('/')}/?checkout=canceled"
 
 
 @lru_cache

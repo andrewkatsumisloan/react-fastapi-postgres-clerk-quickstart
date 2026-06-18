@@ -61,6 +61,33 @@ class SettingsTests(unittest.TestCase):
             "https://issuer.example.clerk.accounts.dev",
         )
 
+    def test_stripe_enabled_requires_secret_and_default_price(self):
+        settings = Settings(
+            _env_file=None,
+            STRIPE_SECRET_KEY="sk_test_123",
+            STRIPE_WEBHOOK_SECRET="whsec_123",
+            STRIPE_DEFAULT_PRICE_ID="price_123",
+        )
+
+        self.assertTrue(settings.is_stripe_enabled())
+
+    def test_stripe_success_url_includes_checkout_placeholder(self):
+        settings = Settings(
+            _env_file=None,
+            STRIPE_FRONTEND_URL="http://localhost:3000/",
+        )
+
+        self.assertEqual(
+            settings.get_stripe_success_url(),
+            "http://localhost:3000/?checkout=success&session_id={CHECKOUT_SESSION_ID}",
+        )
+
+    def test_invalid_stripe_payment_mode_raises(self):
+        settings = Settings(_env_file=None, STRIPE_PAYMENT_MODE="setup")
+
+        with self.assertRaisesRegex(ValueError, "STRIPE_PAYMENT_MODE"):
+            settings.get_stripe_payment_mode()
+
 
 if __name__ == "__main__":
     unittest.main()
