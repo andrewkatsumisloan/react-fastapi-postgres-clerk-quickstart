@@ -41,7 +41,7 @@ class UserRouteTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(
                 update_user(
-                    user_data=UserUpdate(email="duplicate@example.com"),
+                    user_data=UserUpdate(name="Updated"),
                     current_user=user,
                     db=db,
                 )

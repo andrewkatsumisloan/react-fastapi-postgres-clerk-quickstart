@@ -102,10 +102,11 @@ async def create_checkout_session(
             detail=str(exc),
         ) from exc
 
-    stripe.api_key = settings.STRIPE_SECRET_KEY
+    stripe_api_key = settings.STRIPE_SECRET_KEY
 
     try:
         session = stripe.checkout.Session.create(
+            api_key=stripe_api_key,
             mode=mode,
             line_items=[
                 {

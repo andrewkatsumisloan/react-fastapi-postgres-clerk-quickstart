@@ -1,5 +1,5 @@
 import re
-from typing import Optional
+from typing import Callable, Optional
 
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import make_url
@@ -11,65 +11,78 @@ from sqlalchemy.exc import ProgrammingError, OperationalError
 
 logger = logging.getLogger(__name__)
 DB_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-engine: Optional[Engine] = None
-SessionLocal: Optional[sessionmaker[Session]] = None
+
+
+class DatabaseSessionManager:
+    """Owns the SQLAlchemy engine/session factory lifecycle."""
+
+    def __init__(self, database_url_factory: Callable[[], str]):
+        self._database_url_factory = database_url_factory
+        self._engine: Optional[Engine] = None
+        self._session_factory: Optional[sessionmaker[Session]] = None
+
+    def initialize(self) -> tuple[Engine, sessionmaker[Session]]:
+        if self._engine is not None and self._session_factory is not None:
+            return self._engine, self._session_factory
+
+        database_url = self._database_url_factory()
+        parsed_url = make_url(database_url)
+
+        try:
+            masked_url = parsed_url.render_as_string(hide_password=True)
+            logger.info("Connecting to database at: %s", masked_url)
+
+            is_postgres = parsed_url.drivername.startswith("postgres")
+            if is_postgres:
+                db_engine = create_engine(
+                    database_url,
+                    pool_size=5,
+                    max_overflow=10,
+                    pool_pre_ping=True,
+                    poolclass=QueuePool,
+                )
+            else:
+                db_engine = create_engine(database_url)
+
+            session_factory = sessionmaker(
+                autocommit=False, autoflush=False, bind=db_engine
+            )
+
+            with db_engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+                logger.info("Database connection established successfully")
+
+            self._engine = db_engine
+            self._session_factory = session_factory
+            return self._engine, self._session_factory
+
+        except (OperationalError, ProgrammingError) as e:
+            if "does not exist" in str(e) and parsed_url.drivername.startswith(
+                "postgres"
+            ):
+                try:
+                    create_postgres_database(database_url)
+                    return self.initialize()
+                except Exception as db_create_error:
+                    logger.error("Failed to create database: %s", db_create_error)
+                    raise
+            logger.error("Database connection error: %s", e)
+            raise
+        except Exception as e:
+            logger.error("Failed to initialize database: %s", e)
+            raise
+
+    def get_session_factory(self) -> sessionmaker[Session]:
+        _, session_factory = self.initialize()
+        return session_factory
+
+
+database_manager = DatabaseSessionManager(settings.get_database_url)
 
 
 def initialize_database():
     """Initialize the database connection and session factory."""
-    global engine, SessionLocal
-
-    if engine is not None and SessionLocal is not None:
-        return engine, SessionLocal
-
-    database_url = settings.get_database_url()
-    parsed_url = make_url(database_url)
-
-    try:
-        masked_url = parsed_url.render_as_string(hide_password=True)
-        logger.info(f"Connecting to database at: {masked_url}")
-
-        is_postgres = parsed_url.drivername.startswith("postgres")
-        if is_postgres:
-            db_engine = create_engine(
-                database_url,
-                pool_size=5,
-                max_overflow=10,
-                pool_pre_ping=True,
-                poolclass=QueuePool,
-            )
-        else:
-            db_engine = create_engine(database_url)
-
-        # Create session factory
-        session_factory = sessionmaker(
-            autocommit=False, autoflush=False, bind=db_engine
-        )
-
-        # Test the connection
-        with db_engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-            logger.info("Database connection established successfully")
-
-        engine = db_engine
-        SessionLocal = session_factory
-        return engine, SessionLocal
-
-    except (OperationalError, ProgrammingError) as e:
-        # Handle database doesn't exist case
-        if "does not exist" in str(e) and parsed_url.drivername.startswith("postgres"):
-            try:
-                create_postgres_database(database_url)
-                # Try initialization again after creating database
-                return initialize_database()
-            except Exception as db_create_error:
-                logger.error(f"Failed to create database: {db_create_error}")
-                raise
-        logger.error(f"Database connection error: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        raise
+    return database_manager.initialize()
 
 
 def create_postgres_database(url):
@@ -95,13 +108,12 @@ def create_postgres_database(url):
         if result.scalar() != 1:
             conn.execute(text("COMMIT"))
             conn.execute(text(f'CREATE DATABASE "{db_name}"'))
-            logger.info(f"Created database {db_name}")
+            logger.info("Created database %s", db_name)
 
 
 def get_session_factory() -> sessionmaker[Session]:
     """Return the initialized session factory, creating it if needed."""
-    _, session_factory = initialize_database()
-    return session_factory
+    return database_manager.get_session_factory()
 
 
 # Dependency for routes

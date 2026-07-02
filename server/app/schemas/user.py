@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, ConfigDict, validator
+from pydantic import BaseModel, EmailStr, ConfigDict
 from typing import Optional
 from datetime import datetime
 
@@ -19,7 +19,6 @@ class UserCreate(UserBase):
 class UserUpdate(BaseModel):
     """Schema for updating a user"""
 
-    email: Optional[EmailStr] = None
     name: Optional[str] = None
 
 

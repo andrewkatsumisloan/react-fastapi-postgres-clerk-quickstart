@@ -1,3 +1,4 @@
+from functools import lru_cache
 from typing import Any, Dict, Optional
 import logging
 
@@ -15,24 +16,21 @@ from app.models.models import User
 
 logger = logging.getLogger(__name__)
 security = HTTPBearer()
-_jwks_client: Optional[PyJWKClient] = None
+
+
+@lru_cache(maxsize=8)
+def _build_jwks_client(jwks_url: str) -> PyJWKClient:
+    return PyJWKClient(jwks_url)
 
 
 def _get_jwks_client() -> PyJWKClient:
-    global _jwks_client
-
     if not settings.CLERK_JWT_ISSUER:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Authentication is not configured",
         )
 
-    if _jwks_client is None:
-        _jwks_client = PyJWKClient(
-            f"{settings.CLERK_JWT_ISSUER}/.well-known/jwks.json"
-        )
-
-    return _jwks_client
+    return _build_jwks_client(f"{settings.CLERK_JWT_ISSUER}/.well-known/jwks.json")
 
 
 def validate_jwt(token: str) -> Dict[str, Any]:

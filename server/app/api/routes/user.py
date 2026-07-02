@@ -37,7 +37,6 @@ async def update_user(
     """
     Update current user
     """
-    # Update fields that are provided
     for field, value in user_data.model_dump(exclude_unset=True).items():
         setattr(current_user, field, value)
 
